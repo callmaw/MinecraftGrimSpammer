@@ -26,43 +26,43 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Отправляет серверу пакеты, которые Grim считает нарушениями.
+ * Sends packets to the server that Grim treats as violations.
  *
- * Причина кика в предыдущих версиях была связана не с алертами, а с лимитом
- * отменённых пакетов. В исходниках Grim метод onPacketCancel увеличивает счётчик,
- * а PacketLimiter сбрасывает его раз в секунду. Порог по умолчанию равен ста.
+ * The kick in earlier versions was caused not by alerts but by the cancelled packet
+ * limit. In the Grim source the onPacketCancel method increases a counter and
+ * PacketLimiter resets it once per second. The default threshold is one hundred.
  *
- * Все векторы делятся на две группы. Бесплатные векторы заставляют Grim
- * зафиксировать нарушение, но не отменяют пакет. Отменяемые векторы
- * расходуют бюджет и поэтому ограничены скользящим окном в одну секунду.
+ * All vectors are split into two groups. Free vectors make Grim register a violation
+ * but do not cancel the packet. Cancelling vectors spend the budget and are therefore
+ * limited by a rolling one second window.
  */
 public final class SpamEngine {
 
     /*
-     * Бесплатные векторы повторяются несколько раз, чтобы сместить выборку
-     * в сторону самых надёжных из них. Вектор dig даёт обычную проверку BadPacketsL
-     * и работает всегда. Остальные проверки экспериментальные и зависят от настроек сервера.
+     * Free vectors are repeated several times to bias the selection toward the most
+     * reliable ones. The dig vector uses the ordinary BadPacketsL check and always
+     * works. The other checks are experimental and depend on server settings.
      */
     private static final String[] FREE_VECTORS = {
             "dig", "dig", "inputDup", "inputDup", "sleep", "respawn"
     };
 
-    /** Векторы, которые Grim отменяет, кроме атак Reach и пакетов движения. */
+    /** Vectors cancelled by Grim, except Reach attacks and movement packets. */
     private static final String[] CANCEL_VECTORS = {
             "heldItem", "sprint", "abilities", "spectate", "input", "paddle"
     };
 
-    /** Стоимость одного отменяемого пакета в юнитах бюджета. */
+    /** Cost of one cancelling packet in budget units. */
     private static final int COST_CANCEL_VECTOR = 2;
 
-    /** Стоимость одной атаки Reach: её отменяют несколько проверок подряд. */
+    /** Cost of one Reach attack, cancelled by several checks in a row. */
     private static final int COST_REACH = 3;
 
-    /** Стоимость одного пакета движения с необычным поворотом. */
+    /** Cost of one movement packet with an unusual rotation. */
     private static final int COST_PITCH = 2;
 
-    /* Поворот по вертикали держим в допустимых пределах, иначе ваниль
-     * отключает игрока с сообщением о некорректном пакете движения. */
+    /* Keep the vertical rotation inside valid limits, otherwise vanilla disconnects
+     * the player with an invalid movement packet message. */
     private static final float SAFE_PITCH = 0.0F;
 
     private static final long WINDOW_MS = 1000L;
@@ -77,10 +77,13 @@ public final class SpamEngine {
     private double reachAcc;
     private double pitchAcc;
 
-    /** Метки времени отменяемых пакетов за последнюю секунду. */
+    /** Timestamps of cancelled packets during the last second. */
     private final ArrayDeque<Long> cancelWindow = new ArrayDeque<>();
 
-    /** Сбрасывает всё состояние при выключении режима или вылете с сервера. */
+    /** Timestamps of all packets during the last second. */
+    private final ArrayDeque<Long> totalWindow = new ArrayDeque<>();
+
+    /** Resets all state when the mode is turned off or the player leaves the server. */
     public void reset() {
         freeCursor = 0;
         cancelCursor = 0;
@@ -91,11 +94,12 @@ public final class SpamEngine {
         reachAcc = 0;
         pitchAcc = 0;
         cancelWindow.clear();
+        totalWindow.clear();
     }
 
     /**
-     * Выполняет один клиентский тик, то есть двадцать раз в секунду.
-     * Возвращает false только при критической ошибке, когда мод надо выключить.
+     * Runs one client tick, twenty times per second.
+     * Returns false only on a critical error when the mod must be turned off.
      */
     public boolean tick(Minecraft mc, SpamConfig cfg) {
         LocalPlayer player = mc.player;
@@ -109,7 +113,7 @@ public final class SpamEngine {
             long now = System.currentTimeMillis();
             pruneWindow(now);
 
-            sendFree(conn, player, cfg);
+            sendFree(conn, player, cfg, now);
             sendReach(mc, conn, player, cfg, now);
             sendCancelPlain(conn, player, cfg, now);
             sendMovement(conn, player, cfg, now);
@@ -120,15 +124,30 @@ public final class SpamEngine {
         }
     }
 
-    /** Удаляет из окна метки старше одной секунды. */
+    /** Removes timestamps older than one second from both windows. */
     private void pruneWindow(long now) {
         long cutoff = now - WINDOW_MS;
         while (!cancelWindow.isEmpty() && cancelWindow.peekFirst() <= cutoff) {
             cancelWindow.removeFirst();
         }
+        while (!totalWindow.isEmpty() && totalWindow.peekFirst() <= cutoff) {
+            totalWindow.removeFirst();
+        }
     }
 
-    /** Проверяет, можно ли отправить ещё один отменяемый пакет. */
+    /**
+     * Checks the global packet limit. Returns false when the limit is reached.
+     * This protects against server limiters that kick for sending packets too often.
+     */
+    private boolean canSendTotal(SpamConfig cfg, long now) {
+        if (totalWindow.size() >= cfg.totalPacketsPerSecond) {
+            return false;
+        }
+        totalWindow.addLast(now);
+        return true;
+    }
+
+    /** Checks whether one more cancelling packet can be sent. */
     private boolean canCancel(SpamConfig cfg, int cost, long now) {
         if (cancelWindow.size() + cost > cfg.cancelBudgetPerSecond) {
             return false;
@@ -139,9 +158,9 @@ public final class SpamEngine {
         return true;
     }
 
-    // Бесплатные векторы. Они дают алерты и нагрузку, но не расходуют бюджет отмен.
+    // Free vectors. They produce alerts and load without spending the cancel budget.
 
-    private void sendFree(ClientPacketListener conn, LocalPlayer player, SpamConfig cfg) {
+    private void sendFree(ClientPacketListener conn, LocalPlayer player, SpamConfig cfg, long now) {
         freeAcc += cfg.freePacketsPerSecond / 20.0;
         int budget = (int) freeAcc;
         freeAcc -= budget;
@@ -163,7 +182,7 @@ public final class SpamEngine {
             String id = enabled.get(freeCursor % enabled.size());
             freeCursor++;
             Packet<?> packet = buildFree(id, player);
-            if (packet != null) {
+            if (packet != null && canSendTotal(cfg, now)) {
                 conn.send(packet);
             }
         }
@@ -172,8 +191,8 @@ public final class SpamEngine {
     private Packet<?> buildFree(String id, LocalPlayer player) {
         switch (id) {
             /*
-             * BadPacketsL видит последовательность, отличную от нуля, и фиксирует нарушение.
-             * Для этого действия метод canCancel возвращает ложь, поэтому пакет не отменяется.
+             * BadPacketsL sees a sequence other than zero and registers a violation.
+             * For this action canCancel returns false, so the packet is not cancelled.
              */
             case "dig":
                 return new ServerboundPlayerActionPacket(
@@ -181,8 +200,8 @@ public final class SpamEngine {
                         BlockPos.ZERO, Direction.DOWN, 1);
 
             /*
-             * Дубль пакета ввода в одном тике попадает под BadPacketsZ.
-             * Проверки Vehicle слушают другой тип пакета и поэтому не отменяют его.
+             * A duplicate input packet in one tick triggers BadPacketsZ.
+             * The Vehicle checks listen to a different packet type and do not cancel it.
              */
             case "inputDup":
                 return new ServerboundPlayerInputPacket(player.input.keyPresses);
@@ -203,7 +222,7 @@ public final class SpamEngine {
         }
     }
 
-    // Обычные отменяемые векторы. Каждый из них расходует бюджет.
+    // Ordinary cancelling vectors. Each of them spends the cancel budget.
 
     private void sendCancelPlain(ClientPacketListener conn, LocalPlayer player,
                                  SpamConfig cfg, long now) {
@@ -231,7 +250,7 @@ public final class SpamEngine {
             String id = enabled.get(cancelCursor % enabled.size());
             cancelCursor++;
             Packet<?> packet = buildCancel(id, player);
-            if (packet != null) {
+            if (packet != null && canSendTotal(cfg, now)) {
                 conn.send(packet);
             }
         }
@@ -275,7 +294,7 @@ public final class SpamEngine {
         }
     }
 
-    // Атаки Reach. Дают один алерт на одно нарушение, но стоят три юнита.
+    // Reach attacks. They give one alert per violation but cost three units.
 
     private void sendReach(Minecraft mc, ClientPacketListener conn, LocalPlayer player,
                            SpamConfig cfg, long now) {
@@ -297,6 +316,9 @@ public final class SpamEngine {
 
         for (int i = 0; i < budget; i++) {
             if (!canCancel(cfg, COST_REACH, now)) {
+                return;
+            }
+            if (!canSendTotal(cfg, now)) {
                 return;
             }
             Entity target = targets.get(reachCursor % targets.size());
@@ -341,7 +363,7 @@ public final class SpamEngine {
         return targets;
     }
 
-    // Пакеты движения. Заставляют Grim провести полную симуляцию, но не кикают сервер.
+    // Movement packets. They force Grim to run a full simulation without a vanilla kick.
 
     private void sendMovement(ClientPacketListener conn, LocalPlayer player,
                               SpamConfig cfg, long now) {
@@ -358,6 +380,9 @@ public final class SpamEngine {
 
         for (int i = 0; i < budget; i++) {
             if (!canCancel(cfg, COST_PITCH, now)) {
+                return;
+            }
+            if (!canSendTotal(cfg, now)) {
                 return;
             }
             float yaw = ((pitchCursor++ % 2) == 0) ? 180.0F : -180.0F;

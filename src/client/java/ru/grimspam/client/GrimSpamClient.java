@@ -13,12 +13,12 @@ import net.minecraft.network.chat.Component;
 import java.lang.reflect.Field;
 
 /**
- * Точка входа клиентского мода.
+ * Client entry point of the mod.
  *
- * Одна клавиша по умолчанию G включает и выключает режим отправки пакетов.
- * Клавишу можно переназначить в настройках управления.
- * При вылете с сервера режим выключается сам, а причина кика показывается
- * в чате после следующего входа.
+ * A single key toggles the packet sending mode. The default key is G and it can
+ * be changed in the controls settings. When the player leaves or is kicked from
+ * the server the mode turns off automatically and the kick reason is shown in
+ * chat after the next join.
  */
 public final class GrimSpamClient implements ClientModInitializer {
     private static final SpamEngine ENGINE = new SpamEngine();
@@ -27,10 +27,10 @@ public final class GrimSpamClient implements ClientModInitializer {
     private static KeyMapping toggleKey;
     private static boolean enabled;
 
-    /** Причина последнего кика, которую ещё не показали игроку. */
+    /** Reason of the last kick that has not been shown to the player yet. */
     private static String pendingKickReason;
 
-    /** Признак того, что экран кика уже обработан, чтобы не читать его каждый тик. */
+    /** Flag that the disconnect screen was already processed, so it is not read every tick. */
     private static boolean kickCaptured;
 
     @Override
@@ -43,26 +43,26 @@ public final class GrimSpamClient implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             captureKickReason(client);
 
-            // Если соединение пропало, сразу выключаем режим и сбрасываем счётчики.
+            // If the connection is gone, turn off the mode and reset all counters at once.
             if (enabled && (client.getConnection() == null || client.player == null)) {
                 enabled = false;
                 ENGINE.reset();
                 return;
             }
 
-            // После повторного входа показываем причину прошлого кика.
+            // After the player rejoins, show the reason of the previous kick.
             if (pendingKickReason != null && client.player != null && client.getConnection() != null) {
                 String reason = pendingKickReason;
                 pendingKickReason = null;
-                message(client, "Причина прошлого кика: " + reason);
+                message(client, "Previous kick reason: " + reason);
             }
 
             if (toggleKey.consumeClick()) {
                 enabled = !enabled;
                 ENGINE.reset();
                 message(client, enabled
-                        ? "Включено, лимит отмен в секунду " + config.cancelBudgetPerSecond
-                        : "Выключено, отправка остановлена");
+                        ? "Enabled, cancel budget per second " + config.cancelBudgetPerSecond
+                        : "Disabled, sending stopped");
             }
 
             if (!enabled) {
@@ -79,14 +79,14 @@ public final class GrimSpamClient implements ClientModInitializer {
 
             if (!ok) {
                 enabled = false;
-                message(client, "Ошибка отправки пакетов, режим выключен, подробности в логе");
+                message(client, "Packet sending error, mode turned off, see the log for details");
             }
         });
     }
 
     /**
-     * Находит экран отключения от сервера и запоминает текст причины.
-     * В версии 26.3 причина лежит в приватном поле details класса DisconnectedScreen.
+     * Finds the disconnect screen and remembers the reason text.
+     * In version 26.3 the reason is stored in the private details field of DisconnectedScreen.
      */
     private static void captureKickReason(Minecraft client) {
         Screen screen = client.gui.screen();
@@ -117,17 +117,33 @@ public final class GrimSpamClient implements ClientModInitializer {
                 raw = component.getString();
             }
         } catch (ReflectiveOperationException ignored) {
-            // Оставляем строку из narration, она уже получена выше.
+            // Keep the narration string that was already obtained above.
         }
 
-        // Grim отключает игрока с безликим сообщением о закрытии соединения.
-        // Добавляем понятную расшифровку, чтобы игрок знал, что это лимит отмен.
+        // Some hosts use their own packet limiter and disconnect the player
+        // with a too many packets message. Lower the global limit automatically
+        // and save it, so the next attempt is slower but survives the check.
+        String lower = raw == null ? "" : raw.toLowerCase();
+        if (lower.contains("too many packets")) {
+            int oldLimit = config.totalPacketsPerSecond;
+            int newLimit = Math.max(40, (int) (oldLimit * 0.75));
+            if (newLimit < oldLimit) {
+                config.totalPacketsPerSecond = newLimit;
+                config.save();
+                return "Too many packets kick. Global packet limit reduced from "
+                        + oldLimit + " to " + newLimit + ". Press G to restart.";
+            }
+            return "Too many packets kick. The global packet limit is already minimal.";
+        }
+
+        // Grim disconnects the player with a plain closed connection message.
+        // Add a clear explanation so the player knows it was the cancel limit.
         if (raw == null || raw.isBlank()
                 || raw.toLowerCase().contains("closed")
                 || raw.toLowerCase().contains("disconnect")) {
             return raw == null || raw.isBlank()
-                    ? "Grim, слишком много отменённых пакетов за секунду"
-                    : raw + ". Grim, слишком много отменённых пакетов за секунду";
+                    ? "Grim, too many cancelled packets per second"
+                    : raw + ". Grim, too many cancelled packets per second";
         }
         return raw;
     }
