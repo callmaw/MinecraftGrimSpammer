@@ -1,0 +1,23 @@
+{
+	"schemaVersion": 1,
+	"id": "grimspam",
+	"version": "${version}",
+	"name": "Grim Spam",
+	"description": "One-key packet flood that makes Grim anticheat spam violation alerts to admin chat.",
+	"authors": [
+		"send"
+	],
+	"license": "MIT",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"ru.grimspam.client.GrimSpamClient"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.20.1",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
