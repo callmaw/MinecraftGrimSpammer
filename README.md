@@ -26,3 +26,6 @@ Reach attacks do not work in creative mode.
 
 Only use this tool on servers where you have explicit permission from the server administration. 
 Using it without permission will most likely result in a ban.
+
+If you get kicked from the server, 
+the plugin will automatically increase the spam delay.
